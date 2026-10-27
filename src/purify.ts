@@ -2008,6 +2008,37 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
   };
 
   /**
+   * _handleHookDetachedNode
+   *
+   * A hook may have detached the node from the tree. Per the cached,
+   * unclobberable parentNode getter the node is genuinely out of the tree,
+   * so treat it as removed. The walk root is exempt: a detached IN_PLACE
+   * root is legitimate input and must still be fully sanitized. Nodes
+   * detached by hooks are not recorded in DOMPurify.removed, so the
+   * post-walk IN_PLACE pass does not reach them; on the IN_PLACE path we
+   * neutralize the detached subtree inline so a queued resource-event
+   * handler on it cannot fire in page scope after sanitize returns.
+   *
+   * @param currentNode the node a hook may have detached
+   * @param root the current walk root
+   * @return true if the node is detached and now handled, false otherwise
+   */
+  const _handleHookDetachedNode = function (
+    currentNode: Node,
+    root: Node
+  ): boolean {
+    if (currentNode === root || getParentNode(currentNode) !== null) {
+      return false;
+    }
+
+    if (IN_PLACE) {
+      _neutralizeSubtree(currentNode);
+    }
+
+    return true;
+  };
+
+  /**
    * _sanitizeElements
    *
    * @protect nodeName
@@ -2125,6 +2156,14 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
          skipped; they are removal decisions, not the hook contract. */
       if (removed === false) {
         _executeHooks(hooks.afterSanitizeElements, currentNode, null);
+
+        /* The hook may have detached the kept custom element. Same
+           IN_PLACE hazard as the before/upon sites: neutralize the
+           detached subtree before the walker skips past it (see
+           _handleHookDetachedNode). */
+        if (_handleHookDetachedNode(currentNode, root)) {
+          return true;
+        }
       }
 
       return removed;
@@ -2167,7 +2206,14 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
     /* Execute a hook if present */
     _executeHooks(hooks.afterSanitizeElements, currentNode, null);
 
-    return false;
+    /* The afterSanitizeElements hook is the documented place for
+       node.remove() policies, and a detach here is invisible to every later
+       pass: the iterator advances past the detached subtree, so its
+       descendants are never visited, and hook-detached nodes are not in
+       DOMPurify.removed, so the post-walk IN_PLACE pass does not reach them
+       either. Apply the same detach-neutralization invariant as the
+       before/upon sites: true (removed) if the hook detached the node. */
+    return _handleHookDetachedNode(currentNode, root);
   };
 
   /**
@@ -2430,10 +2476,22 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
    * @protect setAttribute
    *
    * @param currentNode to sanitize
+   * @param root the current walk root
    */
-  const _sanitizeAttributes = function (currentNode: Element): void {
+  const _sanitizeAttributes = function (
+    currentNode: Element,
+    root: Node
+  ): void {
     /* Execute a hook if present */
     _executeHooks(hooks.beforeSanitizeAttributes, currentNode, null);
+
+    /* A hook may have detached the node - the attribute hooks can detach
+       exactly like the element hooks can, and the walker will not revisit
+       the detached subtree. Treat it as removed and, on the IN_PLACE path,
+       neutralize it (see _handleHookDetachedNode for the full rationale). */
+    if (_handleHookDetachedNode(currentNode, root)) {
+      return;
+    }
 
     const { attributes } = currentNode;
 
@@ -2563,6 +2621,11 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
 
     /* Execute a hook if present */
     _executeHooks(hooks.afterSanitizeAttributes, currentNode, null);
+
+    /* Same detach re-check as after beforeSanitizeAttributes: this is the
+       last hook that runs for the node, so a detach here would otherwise
+       hand the caller a live, handler-bearing subtree. */
+    _handleHookDetachedNode(currentNode, root);
   };
 
   /**
@@ -2585,7 +2648,7 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
       _sanitizeElements(shadowNode, fragment);
 
       /* Check attributes next */
-      _sanitizeAttributes(shadowNode);
+      _sanitizeAttributes(shadowNode, fragment);
 
       /* Deep shadow DOM detected.
          Realm-safe check (GHSA-hpcv-96wg-7vj8): use nodeType against the
@@ -2954,7 +3017,7 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
         _sanitizeElements(currentNode, walkRoot);
 
         /* Check attributes next */
-        _sanitizeAttributes(currentNode);
+        _sanitizeAttributes(currentNode, walkRoot);
 
         /* Shadow DOM detected, sanitize it.
            Realm-safe check (GHSA-hpcv-96wg-7vj8): nodeType-based detection
