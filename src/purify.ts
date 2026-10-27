@@ -3005,6 +3005,32 @@ function createDOMPurify(window: WindowLike = getGlobal()): DOMPurify {
          walk could no longer reach. */
       _neutralizeEscapedElements(dirty as Node, inPlaceNodes);
 
+      /* Detect the one shape that cannot be made safe in place: the in-place
+         ROOT was itself force-removed during the walk (a rawtext root killed
+         by the mXSS canary, a <style> root with an element child, a root with
+         an invalid namespace, …). A root that still had a parent is detached
+         normally by _forceRemove (so the parentless-root throw there is not
+         reached) and, for a rawtext element, still carries a literal
+         `</tag>`-bearing text payload that the attribute pass does not touch,
+         so re-serialising and re-parsing the returned node re-opens the
+         markup. There is no safe node to hand back, so fail closed - identical
+         in spirit to the parentless-root throw in `_forceRemove` and the
+         clobbered-root throw at the IN_PLACE entry. Covers every present and
+         future root-kill reason in one check. */
+      let rootWasRemoved = false;
+      arrayForEach(DOMPurify.removed, (entry) => {
+        if (entry.element && entry.element === dirty) {
+          rootWasRemoved = true;
+        }
+      });
+
+      if (rootWasRemoved) {
+        throw typeErrorCreate(
+          'a node selected for removal could not be safely returned; ' +
+            'refusing to sanitize in place'
+        );
+      }
+
       if (SAFE_FOR_TEMPLATES) {
         _scrubTemplateExpressions(dirty as Element);
       }

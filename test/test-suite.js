@@ -2077,6 +2077,138 @@
       }
     );
 
+    QUnit.test(
+      'throws instead of returning a force-removed rawtext root (mXSS reparse)',
+      (assert) => {
+        // A <style> passed as the IN_PLACE root whose text content already
+        // carries its own end tag is force-removed by the mXSS canary: its
+        // literal serialization ("</style><img ...>") re-opens markup on an
+        // HTML reparse. The attribute pass cancels the attribute axis (the
+        // onclick below) but cannot defang rawtext text, so the detached root
+        // must not be handed back to the caller. Fail closed — assert the
+        // return contract, not merely a scrubbed textContent, so a future
+        // refactor cannot pass by defanging text while still returning.
+        const dirty = document.createElement('style');
+        dirty.setAttribute('onclick', 'alert(1)');
+        dirty.textContent = '</style><img src=x onerror=alert(1)>';
+        document.body.appendChild(dirty);
+
+        assert.throws(
+          () => DOMPurify.sanitize(dirty, { IN_PLACE: true }),
+          /refusing to sanitize in place/,
+          'force-removed rawtext root is not returned'
+        );
+        assert.ok(
+          DOMPurify.removed.some((entry) => entry.element === dirty),
+          'root was recorded as removed during the aborted call'
+        );
+
+        if (dirty.parentNode) {
+          dirty.parentNode.removeChild(dirty);
+        }
+        window.xssed = false;
+      }
+    );
+
+    QUnit.test(
+      'still returns the root when a rawtext CHILD (not the root) is removed',
+      (assert) => {
+        // The fail-closed guard must fire ONLY when the ROOT itself is
+        // force-removed. A dangerous rawtext child is detached from the
+        // returned root as usual; the root remains safe to return, so the
+        // guard must not over-trigger on ordinary child removals.
+        const dirty = document.createElement('div');
+        dirty.innerHTML = '<span>ok</span>';
+        const style = document.createElement('style');
+        style.textContent = '</style><img src=x onerror=alert(1)>';
+        dirty.appendChild(style);
+        document.body.appendChild(dirty);
+
+        const clean = DOMPurify.sanitize(dirty, { IN_PLACE: true });
+        assert.equal(clean, dirty, 'returns the input root');
+        assert.equal(
+          dirty.querySelector('style'),
+          null,
+          'dangerous rawtext child removed from the returned root'
+        );
+        assert.equal(
+          dirty.querySelector('span').textContent,
+          'ok',
+          'safe sibling content preserved'
+        );
+
+        if (dirty.parentNode) {
+          dirty.parentNode.removeChild(dirty);
+        }
+        window.xssed = false;
+      }
+    );
+
+    QUnit.test(
+      'throws instead of returning an attached <style> root removed for its element child',
+      (assert) => {
+        // Same fail-closed contract for a different root-kill reason: a
+        // <style> root that has an element child is force-removed by the
+        // style-with-element-child mXSS rule (the text canary does not fire
+        // because firstElementChild is set). Its rawtext text still carries
+        // a literal "</style>" breakout, so handing the detached root back
+        // would re-open markup on an HTML reparse.
+        const dirty = document.createElement('style');
+        dirty.textContent = '</style><img src=x onerror=alert(1)>';
+        dirty.appendChild(document.createElement('b'));
+        document.body.appendChild(dirty);
+
+        try {
+          assert.throws(
+            () => DOMPurify.sanitize(dirty, { IN_PLACE: true }),
+            /refusing to sanitize in place/,
+            'force-removed <style> root with element child is not returned'
+          );
+          assert.ok(
+            DOMPurify.removed.some((entry) => entry.element === dirty),
+            'root was recorded as removed during the aborted call'
+          );
+        } finally {
+          if (dirty.parentNode) {
+            dirty.parentNode.removeChild(dirty);
+          }
+          window.xssed = false;
+        }
+      }
+    );
+
+    QUnit.test(
+      'throws instead of returning a force-removed ADD_TAGS rawtext root (xmp)',
+      (assert) => {
+        // Any rawtext element the caller allow-lists as an IN_PLACE root is
+        // exposed the same way as <style>: <xmp> serializes its text
+        // literally, so a "</xmp>" breakout in its text re-opens markup on
+        // reparse once the mXSS canary has force-removed (and thereby
+        // detached) the attached root.
+        const dirty = document.createElement('xmp');
+        dirty.textContent = '</xmp><img src=x onerror=alert(1)>';
+        document.body.appendChild(dirty);
+
+        try {
+          assert.throws(
+            () =>
+              DOMPurify.sanitize(dirty, { IN_PLACE: true, ADD_TAGS: ['xmp'] }),
+            /refusing to sanitize in place/,
+            'force-removed rawtext root is not returned'
+          );
+          assert.ok(
+            DOMPurify.removed.some((entry) => entry.element === dirty),
+            'root was recorded as removed during the aborted call'
+          );
+        } finally {
+          if (dirty.parentNode) {
+            dirty.parentNode.removeChild(dirty);
+          }
+          window.xssed = false;
+        }
+      }
+    );
+
     // A hook that detaches a node via node.remove() (the documented removal
     // pattern) takes the subtree out of the tree before the walker reaches
     // its descendants, and hook-detached nodes are deliberately not recorded
